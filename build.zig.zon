@@ -1,0 +1,7 @@
+.{
+    .name = .learnzig,
+    .fingerprint = 0x9e242f2cfcbe243f,
+    .version = "0.1.0",
+    .minimum_zig_version = "0.15.0",
+    .paths = .{""},
+}
