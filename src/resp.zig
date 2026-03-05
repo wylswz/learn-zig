@@ -3,6 +3,17 @@
 /// Wire format: +OK\r\n  -ERR\r\n  :42\r\n  $6\r\nfoobar\r\n  *2\r\n...
 const std = @import("std");
 
+const crlf = "\r\n";
+const cr: u8 = '\r';
+
+pub const Type = struct {
+    pub const simple_string = '+';
+    pub const error_string = '-';
+    pub const integer = ':';
+    pub const bulk_string = '$';
+    pub const array = '*';
+};
+
 // ---------------------------------------------------------------------------
 // Value type (given — implement writeTo)
 // ---------------------------------------------------------------------------
@@ -14,31 +25,47 @@ pub const Value = union(enum) {
     bulk_string: ?[]const u8,
     array: ?[]Value,
 
+    pub fn of_str(s: []const u8) Value {
+        return .{ .simple_string = s };
+    }
+
+    pub fn of_int(n: i64) Value {
+        return .{ .integer = n };
+    }
+
+    pub fn of_bulk_string(s: []const u8) Value {
+        return .{ .bulk_string = s };
+    }
+
+    pub fn of_array(elems: []Value) Value {
+        return .{ .array = elems };
+    }
+
     pub fn writeTo(self: Value, writer: anytype) !void {
         switch (self) {
             .simple_string => |s| {
                 try writer.writeAll("+");
                 try writer.writeAll(s);
-                try writer.writeAll("\r\n");
+                try writer.writeAll(crlf);
             },
             .error_string => |s| {
                 try writer.writeAll("-");
                 try writer.writeAll(s);
-                try writer.writeAll("\r\n");
+                try writer.writeAll(crlf);
             },
-            .integer => |n| try writer.print(":{d}\r\n", .{n}),
+            .integer => |n| try writer.print(":{d}{s}", .{ n, crlf }),
             .bulk_string => |maybe| {
                 if (maybe) |s| {
-                    try writer.print("${d}\r\n", .{s.len});
+                    try writer.print("${d}{s}", .{ s.len, crlf });
                     try writer.writeAll(s);
-                    try writer.writeAll("\r\n");
-                } else try writer.writeAll("$-1\r\n");
+                    try writer.writeAll(crlf);
+                } else try writer.writeAll("$-1{s}", .{crlf});
             },
             .array => |maybe| {
                 if (maybe) |elems| {
-                    try writer.print("*{d}\r\n", .{elems.len});
+                    try writer.print("*{d}{s}", .{ elems.len, crlf });
                     for (elems) |elem| try elem.writeTo(writer);
-                } else try writer.writeAll("*-1\r\n");
+                } else try writer.writeAll("*-1{s}", .{crlf});
             },
         }
     }
@@ -49,6 +76,7 @@ pub const Value = union(enum) {
 // ---------------------------------------------------------------------------
 
 pub const ParseError = error{
+    IOError,
     UnexpectedEof,
     InvalidPrefix,
     InvalidLength,
@@ -64,9 +92,22 @@ pub const Parser = struct {
         return .{ .reader = reader, .allocator = allocator };
     }
 
-    pub fn parse(self: *Parser) (ParseError || std.mem.Allocator.Error || error{EndOfStream})!Value {
-        _ = self;
-        @panic("TODO: implement Parser.parse (Module 1)");
+    pub fn parse(self: *Parser) anyerror!Value {
+        if (self.reader.readByte()) |_type| {
+            var buf: std.ArrayList(u8) = .empty;
+            defer buf.deinit(self.allocator);
+            const writer = buf.writer(self.allocator);
+            switch (_type) {
+                Type.simple_string => {
+                    try self.reader.streamUntilDelimiter(writer, cr, null);
+                    return Value.of_str(try self.allocator.dupe(u8, buf.items));
+                },
+
+                else => return ParseError.InvalidPrefix,
+            }
+        } else |err| {
+            return err;
+        }
     }
 };
 

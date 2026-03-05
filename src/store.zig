@@ -6,9 +6,9 @@ pub const Store = struct {
     allocator: std.mem.Allocator,
     // TODO: add fields (buckets, len, Node type, etc.)
 
-    pub fn init(allocator: std.mem.Allocator) Store {
-        _ = allocator;
-        @panic("TODO: implement Store.init");
+    pub fn init(_: std.mem.Allocator) Store {
+        return undefined;
+        // @panic("TODO: implement Store.init");
     }
 
     pub fn deinit(self: *Store) void {
