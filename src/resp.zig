@@ -10,7 +10,7 @@ pub const Type = struct {
     pub const simple_string = '+';
     pub const error_string = '-';
     pub const integer = ':';
-    pub const bulk_string = '$';
+    pub const bulk_string = '$'; // $<length>\r\n<data>\r\n
     pub const array = '*';
 };
 
@@ -27,6 +27,10 @@ pub const Value = union(enum) {
 
     pub fn of_str(s: []const u8) Value {
         return .{ .simple_string = s };
+    }
+
+    pub fn of_error_string(s: []const u8) Value {
+        return .{ .error_string = s };
     }
 
     pub fn of_int(n: i64) Value {
@@ -92,15 +96,71 @@ pub const Parser = struct {
         return .{ .reader = reader, .allocator = allocator };
     }
 
+    fn is_digit(c: u8) bool {
+        return c >= '0' and c <= '9';
+    }
+
+    fn int_to_usize(i: i64) usize {
+        return @intCast(i);
+    }
+
+    // read next integer from the reader, until the next \r\n.
+    fn read_integer(self: *Parser) !i64 {
+        var buf: std.ArrayList(u8) = .empty;
+        defer buf.deinit(self.allocator);
+        const writer = buf.writer(self.allocator);
+        try self.reader.streamUntilDelimiter(writer, cr, null);
+        // \r is already read, so just skip \n
+        try self.reader.skipBytes(1, .{});
+        return try std.fmt.parseInt(i64, buf.items, 10);
+    }
+
     pub fn parse(self: *Parser) anyerror!Value {
+        var buf: std.ArrayList(u8) = .empty;
+        defer buf.deinit(self.allocator);
+        const writer = buf.writer(self.allocator);
+
         if (self.reader.readByte()) |_type| {
-            var buf: std.ArrayList(u8) = .empty;
-            defer buf.deinit(self.allocator);
-            const writer = buf.writer(self.allocator);
             switch (_type) {
                 Type.simple_string => {
                     try self.reader.streamUntilDelimiter(writer, cr, null);
                     return Value.of_str(try self.allocator.dupe(u8, buf.items));
+                },
+                Type.error_string => {
+                    try self.reader.streamUntilDelimiter(writer, cr, null);
+                    return Value.of_error_string(try self.allocator.dupe(u8, buf.items));
+                },
+                Type.integer => {
+                    var sign: u8 = '+';
+                    const head = try self.reader.readByte();
+                    if (!is_digit(head)) {
+                        if (head != '-' and head != '+') {
+                            return ParseError.InvalidPrefix;
+                        }
+                        sign = head;
+                    } else {
+                        // must write back if first byte is a digit.
+                        try writer.writeByte(head);
+                    }
+                    try self.reader.streamUntilDelimiter(writer, cr, null);
+                    const i = try std.fmt.parseInt(i64, buf.items, 10);
+                    return Value.of_int(if (sign == '-') -i else i);
+                },
+                Type.bulk_string => {
+                    const length = try self.read_integer();
+                    if (length < 0) return ParseError.NegativeLength;
+                    if (length == 0) return Value.of_bulk_string("");
+
+                    const fix_buf = try self.allocator.alloc(
+                        u8,
+                        int_to_usize(length),
+                    );
+                    defer self.allocator.free(fix_buf);
+                    const read_len: usize = try self.reader.readAll(fix_buf);
+                    if (read_len != int_to_usize(length)) {
+                        return ParseError.UnexpectedEof;
+                    }
+                    return Value.of_bulk_string(try self.allocator.dupe(u8, fix_buf));
                 },
 
                 else => return ParseError.InvalidPrefix,
@@ -161,19 +221,32 @@ fn parseFromSlice(allocator: std.mem.Allocator, input: []const u8) !Value {
 test "simple string" {
     const val = try parseFromSlice(testing.allocator, "+OK\r\n");
     try testing.expectEqualStrings("OK", val.simple_string);
-    testing.allocator.free(val.simple_string);
+    freeValue(testing.allocator, val);
 }
 
 test "integer" {
     const val = try parseFromSlice(testing.allocator, ":1000\r\n");
     try testing.expectEqual(@as(i64, 1000), val.integer);
+    freeValue(testing.allocator, val);
+}
+
+test "negative integer" {
+    const val = try parseFromSlice(testing.allocator, ":-1000\r\n");
+    try testing.expectEqual(@as(i64, -1000), val.integer);
+    freeValue(testing.allocator, val);
+}
+
+test "error string" {
+    const val = try parseFromSlice(testing.allocator, "-ERR\r\n");
+    try testing.expectEqualStrings("ERR", val.error_string);
+    freeValue(testing.allocator, val);
 }
 
 test "bulk string" {
     const val = try parseFromSlice(testing.allocator, "$6\r\nfoobar\r\n");
     const s = val.bulk_string.?;
-    defer testing.allocator.free(s);
     try testing.expectEqualStrings("foobar", s);
+    freeValue(testing.allocator, val);
 }
 
 test "array" {
