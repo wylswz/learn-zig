@@ -115,6 +115,12 @@ pub const Parser = struct {
         return try std.fmt.parseInt(i64, buf.items, 10);
     }
 
+    // used after streamUntilDelimiter to skip the last \n since
+    // only \r is read.
+    fn skip_last(self: *Parser) !void {
+        try self.reader.skipBytes(1, .{});
+    }
+
     pub fn parse(self: *Parser) anyerror!Value {
         var buf: std.ArrayList(u8) = .empty;
         defer buf.deinit(self.allocator);
@@ -124,10 +130,12 @@ pub const Parser = struct {
             switch (_type) {
                 Type.simple_string => {
                     try self.reader.streamUntilDelimiter(writer, cr, null);
+                    try self.skip_last();
                     return Value.of_str(try self.allocator.dupe(u8, buf.items));
                 },
                 Type.error_string => {
                     try self.reader.streamUntilDelimiter(writer, cr, null);
+                    try self.skip_last();
                     return Value.of_error_string(try self.allocator.dupe(u8, buf.items));
                 },
                 Type.integer => {
@@ -143,6 +151,7 @@ pub const Parser = struct {
                         try writer.writeByte(head);
                     }
                     try self.reader.streamUntilDelimiter(writer, cr, null);
+                    try self.skip_last();
                     const i = try std.fmt.parseInt(i64, buf.items, 10);
                     return Value.of_int(if (sign == '-') -i else i);
                 },
@@ -160,7 +169,25 @@ pub const Parser = struct {
                     if (read_len != int_to_usize(length)) {
                         return ParseError.UnexpectedEof;
                     }
+                    try self.skip_last();
+                    try self.skip_last();
                     return Value.of_bulk_string(try self.allocator.dupe(u8, fix_buf));
+                },
+
+                Type.array => {
+                    const length = try self.read_integer();
+                    if (length < 0) return ParseError.NegativeLength;
+                    if (length == 0) return Value.of_array(&[0]Value{});
+                    // TODO: recursively parse elements
+                    const fix_buf = try self.allocator.alloc(
+                        Value,
+                        int_to_usize(length),
+                    );
+                    defer self.allocator.free(fix_buf);
+                    for (fix_buf) |*item| {
+                        item.* = try self.parse();
+                    }
+                    return Value.of_array(try self.allocator.dupe(Value, fix_buf));
                 },
 
                 else => return ParseError.InvalidPrefix,
