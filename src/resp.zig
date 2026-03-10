@@ -12,6 +12,7 @@ pub const Type = struct {
     pub const integer = ':';
     pub const bulk_string = '$'; // $<length>\r\n<data>\r\n
     pub const array = '*';
+    pub const _null = '_';
 };
 
 // ---------------------------------------------------------------------------
@@ -24,6 +25,7 @@ pub const Value = union(enum) {
     integer: i64,
     bulk_string: ?[]const u8,
     array: ?[]Value,
+    _null: void,
 
     pub fn of_str(s: []const u8) Value {
         return .{ .simple_string = s };
@@ -43,6 +45,10 @@ pub const Value = union(enum) {
 
     pub fn of_array(elems: []Value) Value {
         return .{ .array = elems };
+    }
+
+    pub fn of_null() Value {
+        return .{ ._null = {} };
     }
 
     pub fn writeTo(self: Value, writer: anytype) !void {
@@ -71,6 +77,7 @@ pub const Value = union(enum) {
                     for (elems) |elem| try elem.writeTo(writer);
                 } else try writer.writeAll("*-1{s}", .{crlf});
             },
+            ._null => try writer.writeAll("_{s}", .{crlf}),
         }
     }
 };
@@ -157,7 +164,7 @@ pub const Parser = struct {
                 },
                 Type.bulk_string => {
                     const length = try self.read_integer();
-                    if (length < 0) return ParseError.NegativeLength;
+                    if (length < 0) return Value.of_null();
                     if (length == 0) return Value.of_bulk_string("");
 
                     const fix_buf = try self.allocator.alloc(
@@ -206,18 +213,6 @@ pub const ok = Value{ .simple_string = "OK" };
 pub const pong = Value{ .simple_string = "PONG" };
 pub const null_bulk = Value{ .bulk_string = null };
 
-pub fn errValue(msg: []const u8) Value {
-    return Value{ .error_string = msg };
-}
-
-pub fn bulkString(s: []const u8) Value {
-    return Value{ .bulk_string = s };
-}
-
-pub fn integer(n: i64) Value {
-    return Value{ .integer = n };
-}
-
 pub fn freeValue(allocator: std.mem.Allocator, v: Value) void {
     switch (v) {
         .simple_string => |s| allocator.free(s),
@@ -230,6 +225,7 @@ pub fn freeValue(allocator: std.mem.Allocator, v: Value) void {
                 allocator.free(elems);
             }
         },
+        ._null => {},
     }
 }
 
